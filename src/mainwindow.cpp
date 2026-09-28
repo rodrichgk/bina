@@ -1,90 +1,118 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
-#include "../timelinewidget/timelinewidget.h"
+#include "appconfig.h"
+#include "audio/audiodecoder.h"
+#include "audio/audioengine.h"
+#include "audio/audioimportdialog.h"
+#include "core/projectmodel.h"
+#include "pianoroll/pianoroll.h"
+#include "theme.h"
+#include "timeline/timelinewidget.h"
 #include "transportdock.h"
-#include "ffmpegaudioengine.h"
-#include "audioimportdialog.h"
+
 #include <QBoxLayout>
-#include <QDateTime>
-#include <QDebug>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QFutureWatcher>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QFileInfo>
+#include <QShortcut>
+#include <QStatusBar>
+#include <QtConcurrent/QtConcurrentRun>
+
+namespace {
+
+// Default track colors cycle through the theme palette
+QColor defaultTrackColor(int index)
+{
+    const QList<QColor> palette = Theme::clipPalette();
+    return palette[index % palette.size()];
+}
+
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
-    , m_transportDock(nullptr)
-    , m_audioEngine(nullptr)
 {
     ui->setupUi(this);
 
-    // Create the audio engine first
-    m_audioEngine = new FFmpegAudioEngine(this);
-    
-    // Create the transport dock
-    m_transportDock = new TransportDock(this);
-    
-    // Create timeline widget
-    m_timelineWidget = new TimelineWidget(this);
+    // The project model is the single source of truth; the timeline and engine both observe it
+    m_model = new ProjectModel(this);
+    const AppConfig& config = AppConfig::instance();
+    const int defaultTracks = (config.getSceneHeight() - config.getTrackHeight()) / config.getTrackHeight();
+    for (int i = 0; i < defaultTracks; ++i) {
+        m_model->addTrack(QString("Track %1").arg(i + 1), defaultTrackColor(i));
+    }
 
-    // Create main layout
+    m_audioEngine = new AudioEngine(m_model, this);
+    m_timelineWidget = new TimelineWidget(m_model, this);
+    m_transportDock = new TransportDock(this);
+
     QVBoxLayout *layout = new QVBoxLayout(ui->centralwidget);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    
-    // Add transport dock at the top
+    layout->addWidget(m_timelineWidget, 1);
     layout->addWidget(m_transportDock);
-    
-    // Add timeline widget (main content)
-    layout->addWidget(m_timelineWidget, 1); // Give timeline widget stretch factor
-    
-    ui->centralwidget->setLayout(layout);
-    
-    // Connect transport dock signals
-    connect(m_transportDock, &TransportDock::playRequested, this, &MainWindow::onPlayRequested);
-    connect(m_transportDock, &TransportDock::stopRequested, this, &MainWindow::onStopRequested);
-    connect(m_transportDock, &TransportDock::recordRequested, this, &MainWindow::onRecordRequested);
-    connect(m_transportDock, &TransportDock::stopAndReturnRequested, this, &MainWindow::onStopAndReturnRequested);
-    connect(m_transportDock, &TransportDock::positionChanged, this, &MainWindow::onPositionChanged);
+
+    // Transport -> engine
+    connect(m_transportDock, &TransportDock::playRequested, m_audioEngine, &AudioEngine::onTransportPlay);
+    connect(m_transportDock, &TransportDock::stopRequested, m_audioEngine, &AudioEngine::onTransportStop);
+    connect(m_transportDock, &TransportDock::stopAndReturnRequested, m_audioEngine, &AudioEngine::onTransportStopAndReturn);
+    connect(m_transportDock, &TransportDock::seekRequested, m_audioEngine, &AudioEngine::onPositionChanged);
+
+    // Transport -> project actions
     connect(m_transportDock, &TransportDock::newProjectRequested, this, &MainWindow::onNewProjectRequested);
     connect(m_transportDock, &TransportDock::audioTrackRequested, this, &MainWindow::onAudioTrackRequested);
-    connect(m_transportDock, &TransportDock::midiTrackRequested, this, &MainWindow::onMidiTrackRequested);
-    connect(m_transportDock, &TransportDock::loadAudioFileRequested, this, &MainWindow::onLoadAudioFileRequested);
-    
-    // Connect audio engine to transport dock
-    connect(m_transportDock, &TransportDock::playRequested, m_audioEngine, &FFmpegAudioEngine::onTransportPlay);
-    connect(m_transportDock, &TransportDock::stopRequested, m_audioEngine, &FFmpegAudioEngine::onTransportStop);
-    connect(m_transportDock, &TransportDock::stopAndReturnRequested, m_audioEngine, &FFmpegAudioEngine::onTransportStopAndReturn);
-    connect(m_transportDock, &TransportDock::positionChanged, m_audioEngine, &FFmpegAudioEngine::onPositionChanged);
-    
-    // Connect audio engine playback state to timeline widget
-    connect(m_audioEngine, &FFmpegAudioEngine::playbackStateChanged, m_timelineWidget, &TimelineWidget::setPlaybackMode);
-    
-    // Connect audio engine to UI components (removed position connection to break feedback loop)
-    connect(m_audioEngine, &FFmpegAudioEngine::playbackStateChanged, this, &MainWindow::onAudioEnginePlaybackStateChanged);
-    
-    // Connect timeline and transport dock for position synchronization
-    // Use Qt::QueuedConnection to prevent signal loops and crashes
-    connect(m_timelineWidget, &TimelineWidget::indicatorPositionChanged, 
-            m_transportDock, &TransportDock::setPosition, Qt::QueuedConnection);
-    connect(m_transportDock, &TransportDock::positionChanged, 
-            m_timelineWidget, &TimelineWidget::setIndicatorPosition, Qt::QueuedConnection);
-    
-    // Connect audio engine position directly to transport dock (bypass MainWindow)
-    connect(m_audioEngine, &FFmpegAudioEngine::positionChanged,
-            m_transportDock, &TransportDock::setPosition, Qt::QueuedConnection);
-    
-    // Connect audio engine position to timeline
-    connect(m_audioEngine, &FFmpegAudioEngine::positionChanged,
-            m_timelineWidget, &TimelineWidget::setIndicatorPosition, Qt::QueuedConnection);
-    
-    // Setup menu bar
+    connect(m_transportDock, &TransportDock::instrumentTrackRequested, this, &MainWindow::onAudioTrackRequested);
+    connect(m_transportDock, &TransportDock::midiTrackRequested, this, &MainWindow::onAudioTrackRequested);
+    connect(m_transportDock, &TransportDock::loadAudioFileRequested, this, &MainWindow::loadAudioFile);
+
+    // Keep playhead, dock readout and scrub bar in sync whichever one moves
+    connect(m_timelineWidget, &TimelineWidget::indicatorPositionChanged, m_audioEngine, &AudioEngine::onPositionChanged);
+    connect(m_timelineWidget, &TimelineWidget::indicatorPositionChanged, m_transportDock, &TransportDock::setPlaybackPosition);
+    connect(m_transportDock, &TransportDock::seekRequested, m_timelineWidget, &TimelineWidget::setIndicatorPosition);
+    connect(m_audioEngine, &AudioEngine::positionChanged, m_transportDock, &TransportDock::setPlaybackPosition);
+    connect(m_audioEngine, &AudioEngine::positionChanged, m_timelineWidget, &TimelineWidget::setIndicatorPosition);
+
+    // Engine owns play state; the model owns project length
+    connect(m_audioEngine, &AudioEngine::playbackStateChanged, m_transportDock, &TransportDock::setPlayingState);
+    connect(m_audioEngine, &AudioEngine::playbackStateChanged, m_timelineWidget, &TimelineWidget::setPlaybackMode);
+    connect(m_model, &ProjectModel::lengthChanged, m_transportDock, &TransportDock::setDuration);
+
+    // Drag & drop onto the timeline
+    connect(m_timelineWidget, &TimelineWidget::filesDropped, this, &MainWindow::onFilesDropped);
+
+    // Note clips open in the piano roll; open piano rolls follow the song position
+    connect(m_timelineWidget, &TimelineWidget::clipEditRequested, this, &MainWindow::openPianoRoll);
+    connect(m_audioEngine, &AudioEngine::positionChanged, this, [this](double seconds) {
+        for (const QPointer<PianoRollWindow>& window : std::as_const(m_pianoRolls)) {
+            if (window) {
+                window->setSongPosition(seconds);
+            }
+        }
+    });
+
+    // Tempo: dock <-> model
+    connect(m_transportDock, &TransportDock::bpmChanged, this, [this](int bpm) { m_model->setTempo(bpm); });
+    connect(m_model, &ProjectModel::tempoChanged, this, [this](double bpm) { m_transportDock->setBPM(qRound(bpm)); });
+
+    connect(m_audioEngine, &AudioEngine::audioError, this, [this](AudioError, const QString& message) {
+        m_transportDock->setPlayingState(m_audioEngine->isPlaying());
+        const QString text = message == "No audio clips loaded"
+            ? QString("Nothing to play yet. Import audio (Ctrl+O) or double-click a lane to write notes.")
+            : message;
+        statusBar()->showMessage(text, 5000);
+    });
+
+    // Space toggles play / pause like every DAW
+    QShortcut* playShortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
+    connect(playShortcut, &QShortcut::activated, m_transportDock, &TransportDock::togglePlay);
+
     setupMenuBar();
-    
-    // Set window properties
-    setWindowTitle("Music Production Studio");
+
+    setWindowTitle("Untitled"); // Shown as "Untitled - Bina" (the application display name)
+    statusBar()->setSizeGripEnabled(false);
     resize(1200, 800);
 }
 
@@ -93,171 +121,225 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
-void MainWindow::onPlayRequested()
-{
-    qDebug() << "Play requested - delegating to audio engine";
-    // Start timeline movement directly like spacebar does
-    m_timelineWidget->startTimelineMovement();
-    // Audio engine handles this via direct connection
-}
-
-void MainWindow::onStopRequested()
-{
-    qDebug() << "Stop requested - delegating to audio engine";
-    // Stop timeline movement directly like spacebar does
-    m_timelineWidget->stopTimelineMovement();
-    // Audio engine handles this via direct connection
-}
-
-void MainWindow::onRecordRequested()
-{
-    qDebug() << "Record requested";
-    // TODO: Implement actual recording functionality
-    // For now, just acknowledge the request
-}
-
-void MainWindow::onStopAndReturnRequested()
-{
-    qDebug() << "Stop and return to start requested - delegating to audio engine";
-    // Audio engine handles this via direct connection
-}
-
-void MainWindow::onPositionChanged(double seconds)
-{
-    qDebug() << "Position changed to:" << seconds << "seconds - delegating to audio engine";
-    // Audio engine handles this via direct connection
-}
-
 void MainWindow::onNewProjectRequested()
 {
-    qDebug() << "New project requested";
-    // Clear audio engine
-    m_audioEngine->clearAudio();
-    
-    // Reset timeline position
-    m_timelineWidget->setIndicatorPosition(0.0);
-    m_transportDock->setPosition(0.0);
-    
-    qDebug() << "New project created - timeline and audio cleared";
+    m_audioEngine->stop();
+    m_model->clearClips();
+    m_model->setTempo(120);
+    for (int i = 0; i < m_model->trackCount(); ++i) {
+        m_model->setTrackName(i, QString("Track %1").arg(i + 1));
+        m_model->setTrackColor(i, defaultTrackColor(i));
+        m_model->setTrackEffects(i, {});
+        m_model->setTrackMuted(i, false);
+        m_model->setTrackSoloed(i, false);
+        m_model->setTrackVolume(i, 1.0f);
+        m_model->setTrackPan(i, 0.0f);
+        m_model->setTrackInstrument(i, InstrumentSettings()); // Ignored on audio tracks
+    }
+    statusBar()->showMessage("New project", 3000);
 }
 
 void MainWindow::onAudioTrackRequested()
 {
-    qDebug() << "Audio track requested";
-    // TODO: Add new audio track to timeline
-    // This should create a new Track object and add it to the TimelineWidget
+    const int count = m_model->trackCount();
+    const int index = m_model->addTrack(QString("Track %1").arg(count + 1), defaultTrackColor(count));
+    statusBar()->showMessage(QString("Added %1. Import audio onto it, or double-click its lane for a note clip")
+                                 .arg(m_model->track(index).name), 5000);
 }
 
-void MainWindow::onLoadAudioFileRequested()
+void MainWindow::openPianoRoll(int clipId)
 {
-    qDebug() << "Load audio file requested from add button";
-    qDebug() << "MainWindow state check:";
-    qDebug() << "  - m_timelineWidget valid:" << (m_timelineWidget != nullptr);
-    qDebug() << "  - m_transportDock valid:" << (m_transportDock != nullptr);
-    qDebug() << "  - m_audioEngine valid:" << (m_audioEngine != nullptr);
-    
-    // Call the same loadAudioFile method used by Ctrl+O
-    loadAudioFile();
-    
-    qDebug() << "onLoadAudioFileRequested completed";
+    const ClipData* clip = m_model->clip(clipId);
+    if (!clip || !clip->isNoteClip()) {
+        return;
+    }
+    // One window per clip; asking again brings it forward
+    if (PianoRollWindow* existing = m_pianoRolls.value(clipId)) {
+        existing->show();
+        existing->raise();
+        existing->activateWindow();
+        return;
+    }
+    auto* window = new PianoRollWindow(m_model, clipId, this);
+    connect(window, &PianoRollWindow::previewRequested, this, [this](int track, int pitch, int velocity) {
+        m_audioEngine->previewNote(track, pitch, velocity);
+    });
+    connect(window, &PianoRollWindow::seekRequested, this, &MainWindow::seekTo);
+    m_pianoRolls.insert(clipId, window);
+    window->setSongPosition(m_audioEngine->currentPosition());
+    window->show();
+    Theme::animate(window, 0.0, 1.0, 160, [window](qreal v) { window->setWindowOpacity(v); });
 }
 
-void MainWindow::onMidiTrackRequested()
+void MainWindow::seekTo(double seconds)
 {
-    qDebug() << "MIDI track requested";
-    // TODO: Implement MIDI track creation
-    // This should add a new MIDI track to the timeline
-}
-
-void MainWindow::onAudioEnginePositionChanged(double seconds)
-{
-    // Update transport dock position display
-    m_transportDock->setPosition(seconds);
-}
-
-
-void MainWindow::onAudioEnginePlaybackStateChanged(bool isPlaying)
-{
-    // Update transport dock play/stop button state
-    qDebug() << "Audio engine playback state changed to:" << (isPlaying ? "playing" : "stopped");
-    
-    // TODO: Update transport dock button visual states
-    // This could involve changing button icons or colors to reflect current state
+    m_audioEngine->setTimelinePosition(seconds);
+    m_timelineWidget->setIndicatorPosition(seconds);
+    m_transportDock->setPlaybackPosition(seconds);
+    for (const QPointer<PianoRollWindow>& window : std::as_const(m_pianoRolls)) {
+        if (window) {
+            window->setSongPosition(seconds);
+        }
+    }
 }
 
 void MainWindow::setupMenuBar()
 {
-    // Create File menu
     QMenu *fileMenu = menuBar()->addMenu("&File");
-    
-    // New Project action
+
     QAction *newProjectAction = new QAction("&New Project", this);
     newProjectAction->setShortcut(QKeySequence::New);
     connect(newProjectAction, &QAction::triggered, this, &MainWindow::onNewProjectRequested);
     fileMenu->addAction(newProjectAction);
-    
+
     fileMenu->addSeparator();
-    
-    // Load Audio File action
-    QAction *loadAudioAction = new QAction("&Load Audio File...", this);
+
+    QAction *loadAudioAction = new QAction("&Import Audio Files...", this);
     loadAudioAction->setShortcut(QKeySequence::Open);
     connect(loadAudioAction, &QAction::triggered, this, &MainWindow::loadAudioFile);
     fileMenu->addAction(loadAudioAction);
-    
+
     fileMenu->addSeparator();
-    
-    // Exit action
+
     QAction *exitAction = new QAction("E&xit", this);
     exitAction->setShortcut(QKeySequence::Quit);
     connect(exitAction, &QAction::triggered, this, &QWidget::close);
     fileMenu->addAction(exitAction);
 }
 
+int MainWindow::trackOrNew(int index)
+{
+    // Any track takes audio; past the last one, add tracks as needed
+    while (index >= m_model->trackCount()) {
+        const int count = m_model->trackCount();
+        m_model->addTrack(QString("Track %1").arg(count + 1), defaultTrackColor(count));
+    }
+    return qMax(0, index);
+}
+
 void MainWindow::loadAudioFile()
 {
-    QString fileName = QFileDialog::getOpenFileName(this,
-        "Load Audio File", "", 
-        "Audio Files (*.mp3 *.wav *.m4a *.ogg *.flac *.aac);;All Files (*)");
-    
-    if (!fileName.isEmpty()) {
-        // Show import dialog to let user choose track and color
-        int totalTracks = m_timelineWidget->getTrackCount();
-        AudioImportDialog importDialog(fileName, totalTracks, this);
-        
-        if (importDialog.exec() == QDialog::Accepted) {
-            AudioImportDialog::ImportSettings settings = importDialog.getImportSettings();
-            
-            AudioResult result = m_audioEngine->loadAudioFile(fileName);
-            if (result.isSuccess()) {
-                qDebug() << "Audio engine successfully loaded file, now adding to timeline...";
-                qDebug() << "Import settings - Track:" << settings.targetTrack << "Color:" << settings.itemColor.name();
-                
-                // Add the loaded audio to the selected track with chosen color
-                qDebug() << "Calling addAudioItemToTrack with file:" << fileName;
-                m_timelineWidget->addAudioItemToTrack(fileName, settings.targetTrack, settings.itemColor);
-                qDebug() << "addAudioItemToTrack completed";
-                
-                // Reset timeline position when new audio is loaded
-                qDebug() << "Resetting timeline and transport positions...";
-                m_timelineWidget->setIndicatorPosition(0.0);
-                m_transportDock->setPosition(0.0);
-                qDebug() << "Position reset completed";
-                
-                // Show success dialog AFTER all operations are complete
-                qDebug() << "About to show success dialog...";
-                QMessageBox::information(this, "Audio Loaded", 
-                    QString("Successfully loaded: %1\nTrack: %2\nColor: %3")
-                    .arg(QFileInfo(fileName).fileName())
-                    .arg(settings.targetTrack + 1)
-                    .arg(settings.itemColor.name()));
-                qDebug() << "Success dialog closed, loadAudioFile method completing";
-            } else {
-                QMessageBox::warning(this, "Load Failed", 
-                    QString("Failed to load audio file:\n%1").arg(result.getErrorMessage()));
-                qDebug() << "Failed to load audio file:" << fileName << result.getErrorMessage();
-            }
+    const QStringList files = QFileDialog::getOpenFileNames(this, "Import Audio Files", "",
+                                                            AudioDecoder::fileDialogFilter());
+    if (files.isEmpty()) {
+        return;
+    }
+
+    AudioImportDialog importDialog(files, m_model, this);
+    if (importDialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const AudioImportDialog::ImportSettings settings = importDialog.getImportSettings();
+
+    QVector<ImportJob> jobs;
+    for (int i = 0; i < files.size(); ++i) {
+        const int track = trackOrNew(settings.oneTrackPerFile ? settings.targetTrack + i : settings.targetTrack);
+        jobs.append({files[i], track, -1.0}); // Append after whatever is already on the track
+    }
+    importFiles(jobs);
+}
+
+void MainWindow::onFilesDropped(const QStringList& filePaths, int track, double seconds)
+{
+    // Dropped files land at the drop point, one per track starting at the hovered lane
+    QVector<ImportJob> jobs;
+    QStringList rejected;
+    int nextTrack = track;
+    for (const QString& path : filePaths) {
+        if (AudioDecoder::isSupportedFile(path)) {
+            jobs.append({path, trackOrNew(nextTrack++), seconds});
         } else {
-            qDebug() << "User cancelled audio import dialog";
+            rejected << QString("%1: not a supported audio file").arg(QFileInfo(path).fileName());
         }
+    }
+    if (jobs.isEmpty()) {
+        statusBar()->showMessage("None of the dropped files are supported audio files", 5000);
+        return;
+    }
+    importFiles(jobs, rejected);
+}
+
+void MainWindow::importFiles(const QVector<ImportJob>& jobs, const QStringList& rejected)
+{
+    if (jobs.isEmpty()) {
+        return;
+    }
+    // Shared by every job of this batch. Decodes finish in any order; clips are committed
+    // strictly in job order so "one after another" follows the order the user chose.
+    struct Batch {
+        QVector<ImportJob> jobs;
+        QVector<DecodeResult> results;
+        QVector<bool> finished;
+        int nextToCommit = 0;
+        int finishedCount = 0;
+        int imported = 0;
+        QStringList errors;
+    };
+    auto batch = std::make_shared<Batch>();
+    batch->jobs = jobs;
+    batch->results.resize(jobs.size());
+    batch->finished.fill(false, jobs.size());
+    batch->errors = rejected;
+
+    const int total = jobs.size();
+    auto showProgress = [this, batch, total]() {
+        if (total == 1) {
+            statusBar()->showMessage(QString("Importing %1...").arg(QFileInfo(batch->jobs.first().filePath).fileName()));
+        } else {
+            statusBar()->showMessage(QString("Importing %1 of %2...").arg(batch->finishedCount + 1).arg(total));
+        }
+    };
+    showProgress();
+
+    for (int i = 0; i < total; ++i) {
+        auto* watcher = new QFutureWatcher<DecodeResult>(this);
+        connect(watcher, &QFutureWatcher<DecodeResult>::finished, this, [=]() {
+            batch->results[i] = watcher->result();
+            batch->finished[i] = true;
+            ++batch->finishedCount;
+            watcher->deleteLater();
+
+            // Commit every consecutive finished job, in order
+            while (batch->nextToCommit < total && batch->finished[batch->nextToCommit]) {
+                const int n = batch->nextToCommit++;
+                const ImportJob& job = batch->jobs[n];
+                DecodeResult& result = batch->results[n];
+                if (result.ok) {
+                    ClipData clip;
+                    clip.track = job.track;
+                    clip.start = job.start >= 0 ? job.start : m_model->trackEnd(job.track);
+                    clip.filePath = job.filePath; // Color, volume and effects come from the track
+                    clip.audio = result.audio;
+                    clip.peaks = result.peaks;
+                    m_model->addClip(clip);
+                    ++batch->imported;
+                } else {
+                    batch->errors << QString("%1: %2").arg(QFileInfo(job.filePath).fileName(), result.error);
+                }
+                result = DecodeResult(); // The model holds the audio now; drop the batch's copy
+            }
+
+            if (batch->finishedCount < total) {
+                showProgress();
+                return;
+            }
+
+            // Batch done: one summary, and at most one error dialog
+            if (total == 1 && batch->imported == 1) {
+                const ImportJob& job = batch->jobs.first();
+                statusBar()->showMessage(QString("Imported %1 to %2")
+                    .arg(QFileInfo(job.filePath).fileName(), m_model->track(job.track).name), 5000);
+            } else {
+                statusBar()->showMessage(batch->errors.isEmpty()
+                    ? QString("Imported %1 files").arg(batch->imported)
+                    : QString("Imported %1 of %2 files").arg(batch->imported).arg(total + rejected.size()), 6000);
+            }
+            if (!batch->errors.isEmpty()) {
+                QMessageBox::warning(this, "Import Problems",
+                    QString("%1 file(s) could not be imported:\n\n%2")
+                        .arg(batch->errors.size()).arg(batch->errors.join('\n')));
+            }
+        });
+        watcher->setFuture(QtConcurrent::run(&AudioDecoder::decode, jobs[i].filePath, int(AudioEngine::SampleRate)));
     }
 }

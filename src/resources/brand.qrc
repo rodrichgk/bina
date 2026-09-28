@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/brand">
+        <file alias="bina-16.png">brand/bina-16.png</file>
+        <file alias="bina-24.png">brand/bina-24.png</file>
+        <file alias="bina-32.png">brand/bina-32.png</file>
+        <file alias="bina-48.png">brand/bina-48.png</file>
+        <file alias="bina-64.png">brand/bina-64.png</file>
+        <file alias="bina-128.png">brand/bina-128.png</file>
+        <file alias="bina-256.png">brand/bina-256.png</file>
+    </qresource>
+</RCC>

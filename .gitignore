@@ -72,3 +72,12 @@ CMakeLists.txt.user*
 *.dll
 *.exe
 
+
+# Build output and packaged app
+# -----------------------------
+build/
+dist/
+debug_log.txt
+
+# The Windows icon resource is source, not generated
+!src/resources/bina.rc

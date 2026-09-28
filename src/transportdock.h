@@ -10,9 +10,11 @@
 #include <QSpinBox>
 #include <QToolButton>
 #include <QButtonGroup>
-#include <QTimer>
-#include <QFrame>
 #include "appconfig.h"
+#include <QPointer>
+#include <QVariantAnimation>
+
+class PressEffect;
 
 class TransportDock : public QWidget
 {
@@ -27,10 +29,13 @@ public:
     double getCurrentPosition() const { return m_currentPosition; }
     int getBPM() const;
     
-    void setPosition(double seconds);
+    void setPlaybackPosition(double seconds);
     void setBPM(int bpm);
+    void setDuration(double seconds);
 
 public slots:
+    void setPlayingState(bool playing);
+    void togglePlay();
     void play();
     void stop();
     void pause();
@@ -59,7 +64,7 @@ signals:
     void pauseRequested();
     void recordRequested();
     void stopAndReturnRequested();
-    void positionChanged(double seconds);
+    void seekRequested(double seconds);
     void bpmChanged(int bpm);
     
     // Project signals
@@ -78,15 +83,14 @@ private slots:
     void onRecordClicked();
     void onPositionSliderChanged(int value);
     void onBPMChanged(int bpm);
-    void updateTimer();
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
 
 private:
     void setupUI();
-    void setupTransportControls();
-    void setupProjectControls();
-    void setupTrackControls();
-    void setupTimeDisplay();
     void applyModernStyling();
+    void refreshTransportIcons();
     
     QString formatTime(double seconds) const;
     void updateTimeDisplay();
@@ -95,10 +99,11 @@ private:
     bool m_isPlaying;
     bool m_isRecording;
     double m_currentPosition;
-    QTimer* m_updateTimer;
+    
+    // UI Components - Container
+    QWidget* m_dockContainer;
     
     // UI Components - Transport
-    QFrame* m_transportFrame;
     QPushButton* m_playStopButton;
     QPushButton* m_stopAndReturnButton;
     QPushButton* m_recordButton;
@@ -107,24 +112,17 @@ private:
     QPushButton* m_addButton;
     
     // UI Components - Time/Position
-    QFrame* m_timeFrame;
     QLabel* m_timeLabel;
+    QLabel* m_durationLabel;
+    double m_duration = 0.0;
     QSlider* m_positionSlider;
     QSpinBox* m_bpmSpinBox;
     QLabel* m_bpmLabel;
     
-    // UI Components - Project
-    QFrame* m_projectFrame;
-    QToolButton* m_newButton;
-    QToolButton* m_openButton;
-    QToolButton* m_saveButton;
-    
-    // UI Components - Track Management
-    QFrame* m_trackFrame;
-    QToolButton* m_addAudioButton;
-    QToolButton* m_addMidiButton;
-    QToolButton* m_addInstrumentButton;
-    
+    // Armed-record pulse
+    PressEffect* m_recordOpacity = nullptr;
+    QPointer<QVariantAnimation> m_recordPulse;
+
     // Layout
     QHBoxLayout* m_mainLayout;
 };

@@ -1,334 +1,288 @@
-#include "transportdock.h"
+﻿#include "transportdock.h"
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
-#include <QFrame>
-#include <QTimer>
 #include <QStyle>
 #include <QDebug>
 #include <QMenu>
 #include <QAction>
 #include <QGraphicsDropShadowEffect>
+#include "widgets/motion.h"
+#include <QPainter>
+#include "theme.h"
+#include "widgets/tempofield.h"
+#include "timeline/musicalgrid.h"
 
 TransportDock::TransportDock(QWidget *parent)
     : QWidget(parent)
     , m_isPlaying(false)
     , m_isRecording(false)
     , m_currentPosition(0.0)
-    , m_updateTimer(new QTimer(this))
 {
     setupUI();
     applyModernStyling();
-    
-    // Connect timer for position updates
-    connect(m_updateTimer, &QTimer::timeout, this, &TransportDock::updateTimer);
-    m_updateTimer->setInterval(100); // Update every 100ms
 }
 
 void TransportDock::setupUI() {
+    // Outer layout: the dock takes the middle ~60% of the window
     m_mainLayout = new QHBoxLayout(this);
-    m_mainLayout->setSpacing(15);
-    m_mainLayout->setContentsMargins(10, 5, 10, 5);
-    
-    setupTransportControls();
-    setupTimeDisplay();
-    setupProjectControls();
-    setupTrackControls();
-    
-    setLayout(m_mainLayout);
-    setFixedHeight(60);
-}
+    m_mainLayout->setContentsMargins(16, 6, 16, 16); // Room for the painted shadow
 
-void TransportDock::setupTransportControls() {
-    m_transportFrame = new QFrame();
-    m_transportFrame->setFrameStyle(QFrame::StyledPanel);
-    m_transportFrame->setObjectName("transportFrame");
+    m_dockContainer = new QWidget(this);
+    m_dockContainer->setObjectName("dockContainer");
+    m_dockContainer->setAttribute(Qt::WA_StyledBackground, true);
+    m_dockContainer->setMinimumWidth(560);
+    m_dockContainer->setMaximumWidth(980);
+
+    QVBoxLayout* dockLayout = new QVBoxLayout(m_dockContainer);
+    dockLayout->setSpacing(0);
+    dockLayout->setContentsMargins(10, 4, 10, 4);
+
+    auto makeButton = [this](Theme::Glyph glyph, const QString& tip, int size) {
+        QPushButton* b = new QPushButton(this);
+        b->setIcon(Theme::icon(glyph, Theme::TextDim));
+        b->setIconSize(QSize(16, 16));
+        b->setToolTip(tip);
+        b->setFixedSize(size, size);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFocusPolicy(Qt::NoFocus);
+        return b;
+    };
+
+    // ---- Row 1: add on the left, transport buttons centered ----
+    QHBoxLayout* controlsRow = new QHBoxLayout();
+    controlsRow->setSpacing(6);
     
-    QHBoxLayout* transportLayout = new QHBoxLayout(m_transportFrame);
-    transportLayout->setSpacing(5);
-    transportLayout->setContentsMargins(8, 5, 8, 5);
+    m_addButton = makeButton(Theme::Glyph::Plus, "Add (import audio, new track)", 30);
+    m_addButton->setObjectName("addButton");
+    connect(m_addButton, &QPushButton::clicked, this, &TransportDock::showAddMenu);
     
-    // Rewind button
-    m_rewindButton = new QPushButton("⏪", this);
-    m_rewindButton->setToolTip("Rewind");
-    m_rewindButton->setFixedSize(35, 35);
+    m_rewindButton = makeButton(Theme::Glyph::SkipBack, "Return to start", 30);
     connect(m_rewindButton, &QPushButton::clicked, this, &TransportDock::rewind);
     
-    // Play/Stop button (main transport control)
-    m_playStopButton = new QPushButton();
-    m_playStopButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    m_playStopButton->setToolTip("Play");
-    m_playStopButton->setFixedSize(45, 45);
+    m_playStopButton = makeButton(Theme::Glyph::Play, "Play", 32);
+    m_playStopButton->setObjectName("playButton");
     m_playStopButton->setCheckable(true);
     connect(m_playStopButton, &QPushButton::clicked, this, &TransportDock::onPlayStopClicked);
     
-    // Stop and Return button
-    m_stopAndReturnButton = new QPushButton("⏹", this);
-    m_stopAndReturnButton->setToolTip("Stop and Return to Start");
-    m_stopAndReturnButton->setFixedSize(35, 35);
+    m_stopAndReturnButton = makeButton(Theme::Glyph::Stop, "Stop and return to start", 30);
     connect(m_stopAndReturnButton, &QPushButton::clicked, this, &TransportDock::stopAndReturn);
     
-    // Record button
-    m_recordButton = new QPushButton();
-    m_recordButton->setIcon(style()->standardIcon(QStyle::SP_DialogYesButton));
-    m_recordButton->setToolTip("Record");
-    m_recordButton->setFixedSize(35, 35);
+    m_recordButton = makeButton(Theme::Glyph::Record, "Record", 30);
+    m_recordButton->setObjectName("recordButton");
     m_recordButton->setCheckable(true);
     connect(m_recordButton, &QPushButton::clicked, this, &TransportDock::onRecordClicked);
     
-    // Fast forward button
-    m_fastForwardButton = new QPushButton("⏩", this);
-    m_fastForwardButton->setToolTip("Fast Forward");
-    m_fastForwardButton->setFixedSize(35, 35);
+    m_fastForwardButton = makeButton(Theme::Glyph::SkipForward, "Forward 10 seconds", 30);
     connect(m_fastForwardButton, &QPushButton::clicked, this, &TransportDock::fastForward);
     
-    // Add button with plus icon
-    m_addButton = new QPushButton("+", this);
-    m_addButton->setToolTip("Add Items");
-    m_addButton->setFixedSize(35, 35);
-    m_addButton->setStyleSheet("QPushButton { font-size: 18px; font-weight: bold; }");
-    connect(m_addButton, &QPushButton::clicked, this, &TransportDock::showAddMenu);
-    
-    transportLayout->addWidget(m_rewindButton);
-    transportLayout->addWidget(m_playStopButton);
-    transportLayout->addWidget(m_stopAndReturnButton);
-    transportLayout->addWidget(m_recordButton);
-    transportLayout->addWidget(m_fastForwardButton);
-    transportLayout->addWidget(m_addButton);
-    
-    m_mainLayout->addWidget(m_transportFrame);
-}
+    // Add on the left, tempo on the right: same size and outline, so the dock reads symmetrical
+    constexpr int sideWidth = 92;
+    constexpr int sideHeight = 30;
+    m_addButton->setText("Add");
+    m_addButton->setFixedSize(sideWidth, sideHeight);
+    m_bpmSpinBox = new TempoField();
+    m_bpmSpinBox->setObjectName("tempo");
+    m_bpmSpinBox->setRange(20, 400);
+    m_bpmSpinBox->setValue(120);
+    m_bpmSpinBox->setSuffix(" BPM");
+    m_bpmSpinBox->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    m_bpmSpinBox->setKeyboardTracking(false); // Apply when typing is done, not at "1", "14", "140"
+    m_bpmSpinBox->setAlignment(Qt::AlignCenter);
+    m_bpmSpinBox->setFont(Theme::monoFont(9, QFont::Medium));
+    m_bpmSpinBox->setFixedSize(sideWidth, sideHeight);
+    connect(m_bpmSpinBox, &QSpinBox::valueChanged, this, &TransportDock::onBPMChanged);
 
-void TransportDock::setupTimeDisplay() {
-    m_timeFrame = new QFrame();
-    m_timeFrame->setFrameStyle(QFrame::StyledPanel);
-    m_timeFrame->setObjectName("timeFrame");
+    controlsRow->addWidget(m_addButton);
+    controlsRow->addStretch();
+    controlsRow->addWidget(m_rewindButton);
+    controlsRow->addWidget(m_stopAndReturnButton);
+    controlsRow->addWidget(m_playStopButton); // Play sits dead center
+    controlsRow->addWidget(m_recordButton);
+    controlsRow->addWidget(m_fastForwardButton);
+    controlsRow->addStretch();
+    controlsRow->addWidget(m_bpmSpinBox);
     
-    QVBoxLayout* timeLayout = new QVBoxLayout(m_timeFrame);
-    timeLayout->setSpacing(2);
-    timeLayout->setContentsMargins(8, 5, 8, 5);
-    
-    // Time display
-    m_timeLabel = new QLabel("00:00.000");
-    m_timeLabel->setAlignment(Qt::AlignCenter);
-    m_timeLabel->setObjectName("timeLabel");
-    
-    // Position slider
+    // ---- Row 2: full-width scrub bar ----
     m_positionSlider = new QSlider(Qt::Horizontal);
-    m_positionSlider->setRange(0, 10000); // Will be updated based on project length
-    m_positionSlider->setValue(0);
-    m_positionSlider->setToolTip("Timeline Position");
+    m_positionSlider->setObjectName("scrubSlider");
+    m_positionSlider->setRange(0, 0);
+    m_positionSlider->setEnabled(false); // Enabled once audio is loaded
+    m_positionSlider->setToolTip("Drag to move the playhead");
+    m_positionSlider->setFocusPolicy(Qt::NoFocus);
+    m_positionSlider->setCursor(Qt::PointingHandCursor);
     connect(m_positionSlider, &QSlider::valueChanged, this, &TransportDock::onPositionSliderChanged);
     
-    // BPM control
-    QHBoxLayout* bpmLayout = new QHBoxLayout();
-    m_bpmLabel = new QLabel("BPM:");
-    m_bpmSpinBox = new QSpinBox();
-    m_bpmSpinBox->setRange(60, 200);
-    m_bpmSpinBox->setValue(120);
-    m_bpmSpinBox->setToolTip("Beats Per Minute");
-    connect(m_bpmSpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, &TransportDock::onBPMChanged);
+    // ---- Row 3: elapsed under the start of the bar, total under the end ----
+    QHBoxLayout* timeRow = new QHBoxLayout();
+    timeRow->setContentsMargins(2, 0, 2, 0);
     
-    bpmLayout->addWidget(m_bpmLabel);
-    bpmLayout->addWidget(m_bpmSpinBox);
+    m_timeLabel = new QLabel();
+    m_timeLabel->setTextFormat(Qt::RichText);
+    m_timeLabel->setObjectName("timeLabel");
+    m_timeLabel->setFont(Theme::monoFont(9, QFont::Medium));
     
-    timeLayout->addWidget(m_timeLabel);
-    timeLayout->addWidget(m_positionSlider);
-    timeLayout->addLayout(bpmLayout);
+    m_durationLabel = new QLabel(formatTime(0.0));
+    m_durationLabel->setObjectName("durationLabel");
+    m_durationLabel->setFont(Theme::monoFont(9, QFont::Normal));
+    m_durationLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     
-    m_mainLayout->addWidget(m_timeFrame);
+    timeRow->addWidget(m_timeLabel);
+    timeRow->addStretch();
+    timeRow->addWidget(m_durationLabel);
+    
+    dockLayout->addLayout(controlsRow);
+    dockLayout->addWidget(m_positionSlider);
+    dockLayout->addLayout(timeRow);
+    updateTimeDisplay();
+    
+    // Never let the window squeeze the dock (it would clip the round play button)
+    m_dockContainer->setFixedHeight(m_dockContainer->sizeHint().height());
+
+    m_mainLayout->addStretch(1);
+    m_mainLayout->addWidget(m_dockContainer, 3);
+    m_mainLayout->addStretch(1);
+    setLayout(m_mainLayout);
+
+    refreshTransportIcons();
 }
 
-void TransportDock::setupProjectControls() {
-    m_projectFrame = new QFrame();
-    m_projectFrame->setFrameStyle(QFrame::StyledPanel);
-    m_projectFrame->setObjectName("projectFrame");
-    
-    QHBoxLayout* projectLayout = new QHBoxLayout(m_projectFrame);
-    projectLayout->setSpacing(5);
-    projectLayout->setContentsMargins(8, 5, 8, 5);
-    
-    // New project
-    m_newButton = new QToolButton();
-    m_newButton->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
-    m_newButton->setToolTip("New Project");
-    m_newButton->setFixedSize(30, 30);
-    connect(m_newButton, &QToolButton::clicked, this, &TransportDock::newProject);
-    
-    // Open project
-    m_openButton = new QToolButton();
-    m_openButton->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
-    m_openButton->setToolTip("Open Project");
-    m_openButton->setFixedSize(30, 30);
-    connect(m_openButton, &QToolButton::clicked, this, &TransportDock::openProject);
-    
-    // Save project
-    m_saveButton = new QToolButton();
-    m_saveButton->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
-    m_saveButton->setToolTip("Save Project");
-    m_saveButton->setFixedSize(30, 30);
-    connect(m_saveButton, &QToolButton::clicked, this, &TransportDock::saveProject);
-    
-    projectLayout->addWidget(m_newButton);
-    projectLayout->addWidget(m_openButton);
-    projectLayout->addWidget(m_saveButton);
-    
-    m_mainLayout->addWidget(m_projectFrame);
+void TransportDock::setDuration(double seconds) {
+    m_duration = qMax(0.0, seconds);
+    m_durationLabel->setText(formatTime(m_duration));
+
+    m_positionSlider->blockSignals(true);
+    m_positionSlider->setRange(0, static_cast<int>(m_duration * 100));
+    m_positionSlider->blockSignals(false);
+    m_positionSlider->setEnabled(m_duration > 0);
 }
 
-void TransportDock::setupTrackControls() {
-    m_trackFrame = new QFrame();
-    m_trackFrame->setFrameStyle(QFrame::StyledPanel);
-    m_trackFrame->setObjectName("trackFrame");
-    
-    QHBoxLayout* trackLayout = new QHBoxLayout(m_trackFrame);
-    trackLayout->setSpacing(5);
-    trackLayout->setContentsMargins(8, 5, 8, 5);
-    
-    // Add audio track
-    m_addAudioButton = new QToolButton();
-    m_addAudioButton->setIcon(style()->standardIcon(QStyle::SP_MediaVolume));
-    m_addAudioButton->setToolTip("Add Audio Track");
-    m_addAudioButton->setFixedSize(30, 30);
-    connect(m_addAudioButton, &QToolButton::clicked, this, &TransportDock::addAudioTrack);
-    
-    // Add MIDI track
-    m_addMidiButton = new QToolButton();
-    m_addMidiButton->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-    m_addMidiButton->setToolTip("Add MIDI Track");
-    m_addMidiButton->setFixedSize(30, 30);
-    connect(m_addMidiButton, &QToolButton::clicked, this, &TransportDock::addMidiTrack);
-    
-    // Add instrument track
-    m_addInstrumentButton = new QToolButton();
-    m_addInstrumentButton->setIcon(style()->standardIcon(QStyle::SP_MediaSeekForward));
-    m_addInstrumentButton->setToolTip("Add Instrument Track");
-    m_addInstrumentButton->setFixedSize(30, 30);
-    connect(m_addInstrumentButton, &QToolButton::clicked, this, &TransportDock::addInstrumentTrack);
-    
-    trackLayout->addWidget(m_addAudioButton);
-    trackLayout->addWidget(m_addMidiButton);
-    trackLayout->addWidget(m_addInstrumentButton);
-    
-    m_mainLayout->addWidget(m_trackFrame);
-    
-    // Add stretch to push everything to the left
-    m_mainLayout->addStretch();
+void TransportDock::setPlayingState(bool playing) {
+    // Reflects the engine's real state without emitting requests back
+    if (m_isPlaying == playing) {
+        return;
+    }
+    m_isPlaying = playing;
+    refreshTransportIcons();
+}
+
+void TransportDock::togglePlay() {
+    onPlayStopClicked();
+}
+
+void TransportDock::paintEvent(QPaintEvent* event) {
+    Q_UNUSED(event)
+    // Soft shadow under the dock: stacked translucent rounded rects, tinted to the canvas
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    const QRectF dock = QRectF(m_dockContainer->geometry()).translated(0, 4);
+    constexpr int layers = 12;
+    for (int i = layers; i >= 1; --i) {
+        p.setBrush(QColor(4, 4, 6, 10));
+        p.drawRoundedRect(dock.adjusted(-i, -i * 0.5, i, i), 6 + i, 6 + i);
+    }
 }
 
 void TransportDock::applyModernStyling() {
-    setStyleSheet(R"(
-        TransportDock {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #3a3a3a, stop: 1 #2a2a2a);
-            border-top: 1px solid #555;
-        }
-        
-        QFrame#transportFrame, QFrame#timeFrame, QFrame#projectFrame, QFrame#trackFrame {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #4a4a4a, stop: 1 #3a3a3a);
-            border: 1px solid #555;
-            border-radius: 8px;
-            margin: 2px;
-        }
-        
-        QPushButton {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #5a5a5a, stop: 1 #4a4a4a);
-            border: 1px solid #666;
+    // The shadow is painted in paintEvent() rather than with a QGraphicsEffect:
+    // a parent effect stops the buttons' own press effects from rendering.
+
+    QString qss = R"(
+        QWidget#dockContainer {
+            background: @surface;
+            border: 1px solid @border;
             border-radius: 6px;
-            color: white;
-            font-weight: bold;
         }
-        
-        QPushButton:hover {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #6a6a6a, stop: 1 #5a5a5a);
-            border: 1px solid #777;
-        }
-        
-        QPushButton:pressed, QPushButton:checked {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #4a4a4a, stop: 1 #3a3a3a);
-            border: 1px solid #888;
-        }
-        
-        QPushButton#recordButton:checked {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #ff4444, stop: 1 #cc3333);
-        }
-        
-        QToolButton {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #5a5a5a, stop: 1 #4a4a4a);
-            border: 1px solid #666;
+
+        QWidget#dockContainer QPushButton {
+            background: transparent;
+            border: none;
             border-radius: 4px;
-            color: white;
+            padding: 0;
         }
-        
-        QToolButton:hover {
-            background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
-                                      stop: 0 #6a6a6a, stop: 1 #5a5a5a);
+        QWidget#dockContainer QPushButton:hover { background: @hover; }
+        QWidget#dockContainer QPushButton:pressed { background: @raised; }
+
+        QWidget#dockContainer QPushButton#playButton {
+            background: @raised;
+            border: 1px solid @border;
+            border-radius: 15px; /* just under half of 32px, Qt drops radii >= half */
         }
-        
-        QLabel#timeLabel {
-            color: #00ff00;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            font-weight: bold;
-            background: #1a1a1a;
-            border: 1px solid #333;
-            border-radius: 3px;
-            padding: 2px 6px;
+        QWidget#dockContainer QPushButton#playButton:hover { background: @hover; }
+        QWidget#dockContainer QPushButton#playButton:checked { background: @accent; border-color: @accent; }
+        QWidget#dockContainer QPushButton#playButton:checked:hover { background: @accentHover; }
+
+        QWidget#dockContainer QPushButton#recordButton:checked { background: @recordSoft; }
+
+        QWidget#dockContainer QPushButton#addButton {
+            background: @raised;
+            border: 1px solid @border;
+            border-radius: 4px;
+            color: @textDim;
+            padding: 0 12px 0 8px;
+            font-weight: 500;
         }
-        
-        QLabel {
-            color: white;
-            font-weight: bold;
+        QWidget#dockContainer QPushButton#addButton:hover { border-color: @textFaint; color: @text; }
+        QWidget#dockContainer QPushButton#addButton:pressed { background: @hover; }
+        QSpinBox#tempo {
+            background: @raised;
+            border: 1px solid @border;
+            border-radius: 4px;
+            color: @text;
+            padding: 3px 4px;
         }
-        
-        QSlider::groove:horizontal {
-            border: 1px solid #333;
-            height: 6px;
-            background: #222;
-            border-radius: 3px;
-        }
-        
-        QSlider::handle:horizontal {
-            background: #00aa00;
-            border: 1px solid #005500;
-            width: 12px;
-            border-radius: 6px;
-            margin: -3px 0;
-        }
-        
-        QSlider::handle:horizontal:hover {
-            background: #00cc00;
-        }
-        
-        QSpinBox {
-            background: #333;
-            border: 1px solid #555;
-            border-radius: 3px;
-            color: white;
-            padding: 2px;
-            min-width: 50px;
-        }
-        
-        QSpinBox:focus {
-            border: 1px solid #00aa00;
-        }
-    )");
-    
-    // Add subtle drop shadow effect
-    QGraphicsDropShadowEffect* shadow = new QGraphicsDropShadowEffect();
-    shadow->setBlurRadius(10);
-    shadow->setColor(QColor(0, 0, 0, 80));
-    shadow->setOffset(0, 2);
-    setGraphicsEffect(shadow);
+        QSpinBox#tempo:hover { border-color: @textFaint; }
+        QSpinBox#tempo[dragging="true"] { border-color: @accent; color: @accent; }
+        QLabel#timeLabel { color: @text; }
+        QLabel#durationLabel { color: @textFaint; }
+    )";
+    qss.replace("@surface", Theme::Surface.name())
+       .replace("@border", Theme::Border.name())
+       .replace("@hover", Theme::Hover.name())
+       .replace("@raised", Theme::Raised.name())
+       .replace("@accentHover", Theme::Accent.lighter(110).name())
+       .replace("@accent", Theme::Accent.name())
+       .replace("@recordSoft", Theme::rgba(Theme::Record, 40))
+       .replace("@textFaint", Theme::TextFaint.name())
+       .replace("@text", Theme::Text.name());
+    setStyleSheet(qss);
+}
+
+void TransportDock::refreshTransportIcons() {
+    m_playStopButton->setIcon(m_isPlaying
+        ? Theme::icon(Theme::Glyph::Pause, Theme::AccentText)
+        : Theme::icon(Theme::Glyph::Play, Theme::Text));
+    m_playStopButton->setToolTip(m_isPlaying ? "Pause" : "Play");
+    m_playStopButton->setChecked(m_isPlaying);
+
+    m_recordButton->setIcon(Theme::icon(Theme::Glyph::Record,
+        m_isRecording ? Theme::Record : Theme::TextDim));
+    m_recordButton->setChecked(m_isRecording);
+
+    // Armed record breathes so it can't be missed; stops the moment it's disarmed
+    if (!m_recordOpacity) {
+        m_recordOpacity = Motion::pressEffect(m_recordButton); // Also gives it the press bounce
+    }
+    if (m_isRecording && !m_recordPulse && Theme::motionEnabled()) {
+        auto* pulse = new QVariantAnimation(this);
+        pulse->setDuration(1400);
+        pulse->setStartValue(1.0);
+        pulse->setKeyValueAt(0.5, 0.45);
+        pulse->setEndValue(1.0);
+        pulse->setEasingCurve(QEasingCurve::InOutSine);
+        pulse->setLoopCount(-1);
+        connect(pulse, &QVariantAnimation::valueChanged, m_recordOpacity,
+                [this](const QVariant& v) { m_recordOpacity->setOpacity(v.toReal()); });
+        pulse->start(QAbstractAnimation::DeleteWhenStopped);
+        m_recordPulse = pulse;
+    } else if (!m_isRecording && m_recordPulse) {
+        m_recordPulse->stop();
+        m_recordOpacity->setOpacity(1.0);
+    }
 }
 
 // Transport control implementations
@@ -342,95 +296,71 @@ void TransportDock::onPlayStopClicked() {
 
 void TransportDock::play() {
     m_isPlaying = true;
-    m_playStopButton->setIcon(style()->standardIcon(QStyle::SP_MediaPause));
-    m_playStopButton->setToolTip("Pause");
-    m_playStopButton->setChecked(true);
-    m_updateTimer->start(50); // Update every 50ms for smooth playback
+    refreshTransportIcons();
     emit playRequested();
 }
 
 void TransportDock::stop() {
     m_isPlaying = false;
-    m_playStopButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    m_playStopButton->setToolTip("Play");
-    m_playStopButton->setChecked(false);
-    m_updateTimer->stop();
+    refreshTransportIcons();
     emit stopRequested();
 }
 
 void TransportDock::pause() {
     m_isPlaying = false;
-    m_playStopButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    m_playStopButton->setToolTip("Play");
-    m_playStopButton->setChecked(false);
-    m_updateTimer->stop();
+    refreshTransportIcons();
     emit pauseRequested();
 }
 
 void TransportDock::onRecordClicked() {
     m_isRecording = !m_isRecording;
-    m_recordButton->setChecked(m_isRecording);
-    m_recordButton->setObjectName(m_isRecording ? "recordButton" : "");
-    style()->polish(m_recordButton); // Refresh styling
+    refreshTransportIcons();
     emit recordRequested();
 }
 
 void TransportDock::record() {
     m_isRecording = true;
-    m_recordButton->setChecked(true);
+    refreshTransportIcons();
     emit recordRequested();
 }
 
 void TransportDock::rewind() {
-    setPosition(0.0);
+    setPlaybackPosition(0.0);
+    emit seekRequested(0.0);
 }
 
 void TransportDock::fastForward() {
-    // Fast forward by 10 seconds
-    setPosition(m_currentPosition + 10.0);
+    double newPos = m_currentPosition + 10.0;
+    if (m_duration > 0) {
+        newPos = qMin(newPos, m_duration);
+    }
+    setPlaybackPosition(newPos);
+    emit seekRequested(newPos);
 }
 
 void TransportDock::stopAndReturn() {
-    // Stop playback and return to start position
     m_isPlaying = false;
-    m_playStopButton->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    m_playStopButton->setToolTip("Play");
-    m_playStopButton->setChecked(false);
-    m_updateTimer->stop();
+    refreshTransportIcons();
     
-    // Return to start position (0.0 seconds)
-    setPosition(0.0);
-    
+    setPlaybackPosition(0.0);
     emit stopAndReturnRequested();
 }
 
-void TransportDock::setPosition(double seconds) {
-    qDebug() << "TransportDock::setPosition called with seconds:" << seconds;
-    qDebug() << "  - Current position was:" << m_currentPosition;
-    
+void TransportDock::setPlaybackPosition(double seconds) {
     m_currentPosition = seconds;
     updateTimeDisplay();
-    qDebug() << "  - Time display updated";
     
-    // Update slider without triggering signal
     m_positionSlider->blockSignals(true);
     m_positionSlider->setValue(static_cast<int>(seconds * 100)); // Convert to slider scale
     m_positionSlider->blockSignals(false);
-    qDebug() << "  - Position slider updated to value:" << static_cast<int>(seconds * 100);
-    
-    emit positionChanged(seconds);
-    qDebug() << "  - positionChanged signal emitted";
 }
 
 void TransportDock::onPositionSliderChanged(int value) {
     double seconds = value / 100.0; // Convert from slider scale
-    
-    // Update internal state without emitting positionChanged signal
     m_currentPosition = seconds;
     updateTimeDisplay();
     
-    // Emit the signal that directly updates timeline (same as spacebar/play button)
-    emit positionChanged(seconds);
+    emit seekRequested(seconds);
 }
 
 int TransportDock::getBPM() const {
@@ -438,30 +368,22 @@ int TransportDock::getBPM() const {
 }
 
 void TransportDock::setBPM(int bpm) {
+    const QSignalBlocker blocker(m_bpmSpinBox); // Reflect the model, don't echo back
     m_bpmSpinBox->setValue(bpm);
+    updateTimeDisplay();
 }
 
 void TransportDock::onBPMChanged(int bpm) {
+    updateTimeDisplay(); // Same time, new bar position
     emit bpmChanged(bpm);
 }
 
-void TransportDock::updateTimer() {
-    if (m_isPlaying) {
-        m_currentPosition += 0.05; // Increment by 50ms to match timer interval
-        updateTimeDisplay();
-        
-        // Update slider
-        m_positionSlider->blockSignals(true);
-        m_positionSlider->setValue(static_cast<int>(m_currentPosition * 100));
-        m_positionSlider->blockSignals(false);
-        
-        // Emit position change for timeline sync
-        emit positionChanged(m_currentPosition);
-    }
-}
-
 void TransportDock::updateTimeDisplay() {
-    m_timeLabel->setText(formatTime(m_currentPosition));
+    // Musical position first (what you arrange by), clock time dimmer beside it
+    const double secondsPerBeat = 60.0 / qMax(1, m_bpmSpinBox->value());
+    m_timeLabel->setText(QString("%1&nbsp;&nbsp;<span style='color:%2'>%3</span>")
+                             .arg(MusicalGrid::position(m_currentPosition, secondsPerBeat),
+                                  Theme::TextFaint.name(), formatTime(m_currentPosition)));
 }
 
 QString TransportDock::formatTime(double seconds) const {
@@ -504,39 +426,21 @@ void TransportDock::addInstrumentTrack() {
 void TransportDock::showAddMenu() {
     QMenu* addMenu = new QMenu(this);
     
-    // Audio Track option
-    QAction* audioTrackAction = new QAction("Audio Track", this);
-    audioTrackAction->setIcon(style()->standardIcon(QStyle::SP_MediaVolume));
-    connect(audioTrackAction, &QAction::triggered, this, &TransportDock::addAudioTrack);
-    addMenu->addAction(audioTrackAction);
-    
-    // MIDI Track option
-    QAction* midiTrackAction = new QAction("MIDI Track", this);
-    midiTrackAction->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
-    connect(midiTrackAction, &QAction::triggered, this, &TransportDock::addMidiTrack);
-    addMenu->addAction(midiTrackAction);
-    
-    // Instrument Track option
-    QAction* instrumentTrackAction = new QAction("Instrument Track", this);
-    instrumentTrackAction->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
-    connect(instrumentTrackAction, &QAction::triggered, this, &TransportDock::addInstrumentTrack);
-    addMenu->addAction(instrumentTrackAction);
-    
-    addMenu->addSeparator();
-    
-    // Audio File option
-    QAction* audioFileAction = new QAction("Load Audio File...", this);
-    audioFileAction->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
+    QAction* audioFileAction = new QAction("Import Audio Files...", this);
     connect(audioFileAction, &QAction::triggered, [this]() {
-        // Emit a signal that MainWindow can catch to show file dialog
         emit loadAudioFileRequested();
     });
     addMenu->addAction(audioFileAction);
     
-    // Show menu at button position
-    QPoint menuPos = m_addButton->mapToGlobal(QPoint(0, m_addButton->height()));
+    addMenu->addSeparator();
+    
+    QAction* trackAction = new QAction("New Track", this);
+    connect(trackAction, &QAction::triggered, this, &TransportDock::addAudioTrack);
+    addMenu->addAction(trackAction);
+    
+    // Show menu centered above button
+    QPoint menuPos = m_addButton->mapToGlobal(QPoint(0, -addMenu->sizeHint().height() - 10));
     addMenu->exec(menuPos);
     
-    // Clean up
     addMenu->deleteLater();
 }
