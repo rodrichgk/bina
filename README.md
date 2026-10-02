@@ -27,15 +27,16 @@ It is the sibling of **Butu**, a media player for Plex and Jellyfin. Butu is whe
 - **Piano roll.** Double-click an empty spot on any lane to create a note clip, and edit it in its own window: add, move, resize and delete notes, box-select, transpose with the arrow keys, audition keys, and choose your snap.
 - **Five instruments.** Synth, Sampler (any audio file, pitched across the keyboard), Drum Kit (synthesized 808, 909 and acoustic-style kits in the General MIDI layout), FM Synth (electric pianos, bells, basses) and Plucked Strings (a physically modelled string).
 - **Effects per track.** Low-pass, high-pass, delay, distortion and tremolo, processed on that track's own bus so they never touch other tracks.
-- **Import.** Pick many files at once or drop them straight onto the timeline. WAV, MP3, FLAC, OGG, Opus, M4A, AAC and AIFF, decoded with FFmpeg on background threads.
+- **Import.** Pick many files at once (Ctrl+I) or drop them straight onto the timeline. WAV, MP3, FLAC, OGG, Opus, M4A, AAC and AIFF, decoded with FFmpeg on background threads.
+- **Projects.** Save and open `.bina` files (Ctrl+S, Ctrl+O): small, readable JSON that keeps tracks, clips, notes, instruments, effects and tempo. Audio is referenced, not copied, with paths stored relative to the project so a project folder can move as a whole. The title shows unsaved changes, and Bina asks before throwing them away.
 - **Made to feel good.** A draggable tempo field, buttons that react when you press them, and dialogs that ease in. Motion follows Windows' "Animation effects" setting.
 
 ## Status
 
-Bina is early. Things that work end to end: arranging audio and note clips, the instruments and effects, playback, the piano roll and the mixer settings per track.
+Bina is early. Things that work end to end: arranging audio and note clips, the instruments and effects, playback, the piano roll, the mixer settings per track, and saving and opening projects.
 
 Not there yet:
-- saving and loading projects
+- undo and redo
 - recording (the record button arms, but nothing is captured)
 - per-note velocity editing, MIDI keyboards and plug-ins (VST)
 
@@ -65,7 +66,7 @@ The script assumes Qt at `C:\Qt\6.10.1\mingw_64` and FFmpeg's DLLs in `C:\ffmpeg
 
 ```
 src/
-├── core/          # ProjectModel: the single source of truth (tracks, clips, tempo)
+├── core/          # ProjectModel (tracks, clips, tempo) and the .bina project file format
 ├── audio/         # Engine (per-track buses), FFmpeg decoder, effects
 │   └── instruments/   # One self-registering .cpp per instrument (see its README)
 ├── timeline/      # The arrangement view: ruler, grid, lanes, clips

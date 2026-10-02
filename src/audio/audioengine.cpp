@@ -30,6 +30,14 @@ AudioEngine::AudioEngine(ProjectModel* model, QObject* parent)
     connect(m_model, &ProjectModel::clipRemoved, this, &AudioEngine::rebuildRenderList);
     connect(m_model, &ProjectModel::trackChanged, this, &AudioEngine::rebuildRenderList);
     connect(m_model, &ProjectModel::tempoChanged, this, &AudioEngine::rebuildRenderList);
+    connect(m_model, &ProjectModel::projectReset, this, [this]() {
+        // Different project: nothing cached for the old tracks may survive
+        stop();
+        m_effectChains.clear();
+        m_instruments.clear();
+        m_previewInstruments.clear();
+        rebuildRenderList();
+    });
     rebuildRenderList();
 }
 

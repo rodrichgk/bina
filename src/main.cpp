@@ -28,5 +28,10 @@ int main(int argc, char *argv[])
 
     MainWindow w;
     w.show();
+    // "Bina.exe song.bina" opens the project
+    const QStringList args = QApplication::arguments();
+    if (args.size() > 1 && args.at(1).endsWith(".bina", Qt::CaseInsensitive)) {
+        w.openProject(args.at(1));
+    }
     return a.exec();
 }

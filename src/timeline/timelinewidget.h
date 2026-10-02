@@ -51,6 +51,7 @@ protected:
 
 private slots:
     // Model -> view
+    void onProjectReset();
     void onTrackAdded(int index);
     void onTrackChanged(int index);
     void onClipAdded(int id);

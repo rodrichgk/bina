@@ -4,6 +4,7 @@
 #include "audio/audiodecoder.h"
 #include "audio/audioengine.h"
 #include "audio/audioimportdialog.h"
+#include "core/projectfile.h"
 #include "core/projectmodel.h"
 #include "pianoroll/pianoroll.h"
 #include "theme.h"
@@ -11,6 +12,8 @@
 #include "transportdock.h"
 
 #include <QBoxLayout>
+#include <QCloseEvent>
+#include <QStandardPaths>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -39,11 +42,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     // The project model is the single source of truth; the timeline and engine both observe it
     m_model = new ProjectModel(this);
-    const AppConfig& config = AppConfig::instance();
-    const int defaultTracks = (config.getSceneHeight() - config.getTrackHeight()) / config.getTrackHeight();
-    for (int i = 0; i < defaultTracks; ++i) {
-        m_model->addTrack(QString("Track %1").arg(i + 1), defaultTrackColor(i));
-    }
+    m_model->resetProject(defaultTracks(), 120.0);
 
     m_audioEngine = new AudioEngine(m_model, this);
     m_timelineWidget = new TimelineWidget(m_model, this);
@@ -100,7 +99,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_audioEngine, &AudioEngine::audioError, this, [this](AudioError, const QString& message) {
         m_transportDock->setPlayingState(m_audioEngine->isPlaying());
         const QString text = message == "No audio clips loaded"
-            ? QString("Nothing to play yet. Import audio (Ctrl+O) or double-click a lane to write notes.")
+            ? QString("Nothing to play yet. Import audio (Ctrl+I) or double-click a lane to write notes.")
             : message;
         statusBar()->showMessage(text, 5000);
     });
@@ -109,9 +108,23 @@ MainWindow::MainWindow(QWidget *parent)
     QShortcut* playShortcut = new QShortcut(QKeySequence(Qt::Key_Space), this);
     connect(playShortcut, &QShortcut::activated, m_transportDock, &TransportDock::togglePlay);
 
+    // Any edit to the project marks it unsaved (opening a project doesn't count)
+    auto changed = [this]() {
+        if (!m_loading) {
+            setModified(true);
+        }
+    };
+    connect(m_model, &ProjectModel::trackAdded, this, changed);
+    connect(m_model, &ProjectModel::trackChanged, this, changed);
+    connect(m_model, &ProjectModel::clipAdded, this, changed);
+    connect(m_model, &ProjectModel::clipChanged, this, changed);
+    connect(m_model, &ProjectModel::clipRemoved, this, changed);
+    connect(m_model, &ProjectModel::tempoChanged, this, changed);
+
     setupMenuBar();
 
-    setWindowTitle("Untitled"); // Shown as "Untitled - Bina" (the application display name)
+    setProjectPath(QString());
+    setModified(false);
     statusBar()->setSizeGripEnabled(false);
     resize(1200, 800);
 }
@@ -121,22 +134,222 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
+// ---------------------------------------------------------------------------
+// Project files
+
+QVector<TrackData> MainWindow::defaultTracks() const
+{
+    const AppConfig& config = AppConfig::instance();
+    const int count = (config.getSceneHeight() - config.getTrackHeight()) / config.getTrackHeight();
+    QVector<TrackData> tracks;
+    for (int i = 0; i < count; ++i) {
+        TrackData t;
+        t.name = QString("Track %1").arg(i + 1);
+        t.color = defaultTrackColor(i);
+        tracks.append(t);
+    }
+    return tracks;
+}
+
+void MainWindow::setProjectPath(const QString& path)
+{
+    m_projectPath = path;
+    // "[*]" is where Qt shows the unsaved-changes star; the app name is appended by Qt
+    const QString name = path.isEmpty() ? QString("Untitled") : QFileInfo(path).completeBaseName();
+    setWindowTitle(name + "[*]");
+}
+
+void MainWindow::setModified(bool modified)
+{
+    setWindowModified(modified);
+}
+
+void MainWindow::closePianoRolls()
+{
+    for (const QPointer<PianoRollWindow>& window : std::as_const(m_pianoRolls)) {
+        if (window) {
+            window->close();
+        }
+    }
+    m_pianoRolls.clear();
+}
+
+void MainWindow::resetToProject(const QVector<TrackData>& tracks, double tempo)
+{
+    ++m_projectGeneration; // Imports still decoding for the old project are dropped
+    m_loading = false;     // A project that was still opening is abandoned
+    m_pendingLoadSteps = 0;
+    m_audioEngine->stop();
+    closePianoRolls();
+    m_model->resetProject(tracks, tempo);
+}
+
+bool MainWindow::maybeSave()
+{
+    if (!isWindowModified()) {
+        return true;
+    }
+    const QString name = m_projectPath.isEmpty() ? QString("Untitled") : QFileInfo(m_projectPath).completeBaseName();
+    const auto answer = QMessageBox::question(this, "Unsaved Changes",
+        QString("Save changes to \"%1\" before closing it?").arg(name),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (answer == QMessageBox::Save) {
+        return saveProject();
+    }
+    return answer == QMessageBox::Discard;
+}
+
 void MainWindow::onNewProjectRequested()
 {
-    m_audioEngine->stop();
-    m_model->clearClips();
-    m_model->setTempo(120);
-    for (int i = 0; i < m_model->trackCount(); ++i) {
-        m_model->setTrackName(i, QString("Track %1").arg(i + 1));
-        m_model->setTrackColor(i, defaultTrackColor(i));
-        m_model->setTrackEffects(i, {});
-        m_model->setTrackMuted(i, false);
-        m_model->setTrackSoloed(i, false);
-        m_model->setTrackVolume(i, 1.0f);
-        m_model->setTrackPan(i, 0.0f);
-        m_model->setTrackInstrument(i, InstrumentSettings()); // Ignored on audio tracks
+    if (!maybeSave()) {
+        return;
     }
+    resetToProject(defaultTracks(), 120.0);
+    setProjectPath(QString());
+    setModified(false);
     statusBar()->showMessage("New project", 3000);
+}
+
+void MainWindow::openProjectDialog()
+{
+    if (!maybeSave()) {
+        return;
+    }
+    const QString startDir = m_projectPath.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::MusicLocation)
+        : QFileInfo(m_projectPath).absolutePath();
+    const QString path = QFileDialog::getOpenFileName(this, "Open Project", startDir, ProjectFile::fileDialogFilter());
+    if (!path.isEmpty()) {
+        openProject(path);
+    }
+}
+
+bool MainWindow::openProject(const QString& path)
+{
+    ProjectFile::LoadedProject project;
+    QString error;
+    if (!ProjectFile::load(path, &project, &error)) {
+        QMessageBox::warning(this, "Open Project", QString("Could not open %1:\n%2")
+                                                       .arg(QFileInfo(path).fileName(), error));
+        return false;
+    }
+
+    resetToProject(project.tracks, project.tempo);
+    setProjectPath(path);
+    m_loading = true;
+    m_loadProblems.clear();
+    m_pendingLoadSteps = 1; // This function itself; released at the end
+    const int generation = m_projectGeneration;
+
+    // Note clips are complete in the file
+    QVector<ImportJob> audioJobs;
+    for (const ProjectFile::LoadedClip& c : std::as_const(project.clips)) {
+        if (c.kind == ClipData::Kind::Notes) {
+            const int id = m_model->addNoteClip(c.track, c.start, c.lengthBeats);
+            m_model->setClipNotes(id, c.notes);
+        } else {
+            audioJobs.append({c.filePath, c.track, c.start});
+        }
+    }
+
+    // Audio clips and sampler samples are decoded from their files, in the background
+    if (!audioJobs.isEmpty()) {
+        ++m_pendingLoadSteps;
+        importFiles(audioJobs, {}, [this, generation](int, const QStringList& errors) {
+            if (generation == m_projectGeneration) {
+                m_loadProblems << errors;
+                loadStepFinished();
+            }
+        });
+    }
+    for (int i = 0; i < m_model->trackCount(); ++i) {
+        const QString samplePath = m_model->track(i).instrument.samplePath;
+        if (samplePath.isEmpty()) {
+            continue;
+        }
+        ++m_pendingLoadSteps;
+        auto* watcher = new QFutureWatcher<DecodeResult>(this);
+        connect(watcher, &QFutureWatcher<DecodeResult>::finished, this, [this, watcher, i, samplePath, generation]() {
+            const DecodeResult result = watcher->result();
+            watcher->deleteLater();
+            if (generation != m_projectGeneration) {
+                return;
+            }
+            if (result.ok) {
+                InstrumentSettings settings = m_model->track(i).instrument;
+                settings.sample = result.audio;
+                m_model->setTrackInstrument(i, settings);
+            } else {
+                m_loadProblems << QString("%1 (sample for %2): %3")
+                                      .arg(QFileInfo(samplePath).fileName(), m_model->track(i).name, result.error);
+            }
+            loadStepFinished();
+        });
+        watcher->setFuture(QtConcurrent::run(&AudioDecoder::decode, samplePath, int(AudioEngine::SampleRate)));
+    }
+
+    statusBar()->showMessage(QString("Opening %1...").arg(QFileInfo(path).fileName()));
+    loadStepFinished();
+    return true;
+}
+
+void MainWindow::loadStepFinished()
+{
+    if (--m_pendingLoadSteps > 0) {
+        return;
+    }
+    m_loading = false;
+    setModified(false);
+    statusBar()->showMessage(QString("Opened %1").arg(QFileInfo(m_projectPath).fileName()), 4000);
+    if (!m_loadProblems.isEmpty()) {
+        QMessageBox::warning(this, "Missing Audio",
+            QString("%1 file(s) used by this project could not be loaded. The clips that use them "
+                    "were left out, so saving now would drop them.\n\n%2")
+                .arg(m_loadProblems.size()).arg(m_loadProblems.join('\n')));
+    }
+}
+
+bool MainWindow::writeProject(const QString& path)
+{
+    QString error;
+    if (!ProjectFile::save(*m_model, path, &error)) {
+        QMessageBox::warning(this, "Save Project", QString("Could not save %1:\n%2")
+                                                       .arg(QFileInfo(path).fileName(), error));
+        return false;
+    }
+    setProjectPath(path);
+    setModified(false);
+    statusBar()->showMessage(QString("Saved %1").arg(QFileInfo(path).fileName()), 3000);
+    return true;
+}
+
+bool MainWindow::saveProject()
+{
+    return m_projectPath.isEmpty() ? saveProjectAs() : writeProject(m_projectPath);
+}
+
+bool MainWindow::saveProjectAs()
+{
+    const QString startDir = m_projectPath.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::MusicLocation) + "/Untitled.bina"
+        : m_projectPath;
+    QString path = QFileDialog::getSaveFileName(this, "Save Project", startDir, ProjectFile::fileDialogFilter());
+    if (path.isEmpty()) {
+        return false;
+    }
+    if (QFileInfo(path).suffix().isEmpty()) {
+        path += ".bina";
+    }
+    return writeProject(path);
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (maybeSave()) {
+        event->accept();
+    } else {
+        event->ignore();
+    }
 }
 
 void MainWindow::onAudioTrackRequested()
@@ -187,24 +400,23 @@ void MainWindow::setupMenuBar()
 {
     QMenu *fileMenu = menuBar()->addMenu("&File");
 
-    QAction *newProjectAction = new QAction("&New Project", this);
-    newProjectAction->setShortcut(QKeySequence::New);
-    connect(newProjectAction, &QAction::triggered, this, &MainWindow::onNewProjectRequested);
-    fileMenu->addAction(newProjectAction);
+    auto add = [this, fileMenu](const QString& text, const QKeySequence& shortcut, auto slot) {
+        QAction *action = new QAction(text, this);
+        action->setShortcut(shortcut);
+        connect(action, &QAction::triggered, this, slot);
+        fileMenu->addAction(action);
+        return action;
+    };
 
+    add("&New Project", QKeySequence::New, &MainWindow::onNewProjectRequested);
+    add("&Open Project...", QKeySequence::Open, &MainWindow::openProjectDialog);
     fileMenu->addSeparator();
-
-    QAction *loadAudioAction = new QAction("&Import Audio Files...", this);
-    loadAudioAction->setShortcut(QKeySequence::Open);
-    connect(loadAudioAction, &QAction::triggered, this, &MainWindow::loadAudioFile);
-    fileMenu->addAction(loadAudioAction);
-
+    add("&Save", QKeySequence::Save, &MainWindow::saveProject);
+    add("Save &As...", QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S), &MainWindow::saveProjectAs);
     fileMenu->addSeparator();
-
-    QAction *exitAction = new QAction("E&xit", this);
-    exitAction->setShortcut(QKeySequence::Quit);
-    connect(exitAction, &QAction::triggered, this, &QWidget::close);
-    fileMenu->addAction(exitAction);
+    add("&Import Audio Files...", QKeySequence(Qt::CTRL | Qt::Key_I), &MainWindow::loadAudioFile);
+    fileMenu->addSeparator();
+    add("E&xit", QKeySequence::Quit, &QWidget::close);
 }
 
 int MainWindow::trackOrNew(int index)
@@ -259,11 +471,13 @@ void MainWindow::onFilesDropped(const QStringList& filePaths, int track, double 
     importFiles(jobs, rejected);
 }
 
-void MainWindow::importFiles(const QVector<ImportJob>& jobs, const QStringList& rejected)
+void MainWindow::importFiles(const QVector<ImportJob>& jobs, const QStringList& rejected,
+                             std::function<void(int imported, const QStringList& errors)> onFinished)
 {
     if (jobs.isEmpty()) {
         return;
     }
+    const int generation = m_projectGeneration;
     // Shared by every job of this batch. Decodes finish in any order; clips are committed
     // strictly in job order so "one after another" follows the order the user chose.
     struct Batch {
@@ -298,6 +512,9 @@ void MainWindow::importFiles(const QVector<ImportJob>& jobs, const QStringList& 
             batch->finished[i] = true;
             ++batch->finishedCount;
             watcher->deleteLater();
+            if (generation != m_projectGeneration) {
+                return; // The project was replaced while this file decoded
+            }
 
             // Commit every consecutive finished job, in order
             while (batch->nextToCommit < total && batch->finished[batch->nextToCommit]) {
@@ -321,6 +538,11 @@ void MainWindow::importFiles(const QVector<ImportJob>& jobs, const QStringList& 
 
             if (batch->finishedCount < total) {
                 showProgress();
+                return;
+            }
+
+            if (onFinished) {
+                onFinished(batch->imported, batch->errors);
                 return;
             }
 

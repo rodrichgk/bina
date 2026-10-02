@@ -79,6 +79,8 @@ set(PROJECT_SOURCES
     src/resources/brand.qrc
     src/core/projectmodel.cpp
     src/core/projectmodel.h
+    src/core/projectfile.cpp
+    src/core/projectfile.h
     src/core/timescale.h
     src/core/audiobuffer.h
     src/core/instrumentsettings.h

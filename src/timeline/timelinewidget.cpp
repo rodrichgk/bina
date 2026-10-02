@@ -30,6 +30,7 @@ TimelineWidget::TimelineWidget(ProjectModel* model, QWidget* parent)
     setupUi();
     setupIndicator();
 
+    connect(m_model, &ProjectModel::projectReset, this, &TimelineWidget::onProjectReset);
     connect(m_model, &ProjectModel::trackAdded, this, &TimelineWidget::onTrackAdded);
     connect(m_model, &ProjectModel::trackChanged, this, &TimelineWidget::onTrackChanged);
     connect(m_model, &ProjectModel::clipAdded, this, &TimelineWidget::onClipAdded);
@@ -143,7 +144,7 @@ void TimelineWidget::setupView()
     m_emptyHint->setTextFormat(Qt::RichText);
     m_emptyHint->setText(QString(
         "<div style='color:%1; font-size:11pt; font-weight:600;'>Nothing on the timeline yet</div>"
-        "<div style='color:%2; margin-top:6px;'>Drop audio files here, press <b style='color:%1'>Ctrl+O</b>, "
+        "<div style='color:%2; margin-top:6px;'>Drop audio files here, press <b style='color:%1'>Ctrl+I</b>, "
         "or double-click a lane to write notes</div>")
         .arg(Theme::TextDim.name(), Theme::TextFaint.name()));
     m_emptyHintOpacity = new QGraphicsOpacityEffect(m_emptyHint);
@@ -224,6 +225,35 @@ double TimelineWidget::snap(double seconds) const
 
 // ---------------------------------------------------------------------------
 // Model -> view
+
+void TimelineWidget::onProjectReset()
+{
+    // A new or opened project: drop every row and clip, then build from the model
+    for (ClipRegion* region : std::as_const(m_regions)) {
+        m_scene->removeItem(region);
+        delete region;
+    }
+    m_regions.clear();
+    for (TrackLane* lane : std::as_const(m_lanes)) {
+        m_scene->removeItem(lane);
+        delete lane;
+    }
+    m_lanes.clear();
+    m_trackList->clear(); // Deletes the header widgets with their rows
+    m_headers.clear();
+
+    for (int i = 0; i < m_model->trackCount(); ++i) {
+        onTrackAdded(i);
+    }
+    for (int id : m_model->clipIds()) {
+        onClipAdded(id);
+    }
+    updateSceneSize();
+    updateEmptyState();
+    setIndicatorPosition(0.0);
+    m_view->horizontalScrollBar()->setValue(0);
+    m_view->verticalScrollBar()->setValue(0);
+}
 
 void TimelineWidget::onTrackAdded(int index)
 {

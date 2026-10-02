@@ -40,7 +40,7 @@ struct TrackData {
 
     // Plays the track's note clips
     InstrumentSettings instrument;
-    int instrumentRevision = 0; // bumped on every instrument change, so the engine knows to rebuild it
+    int instrumentRevision = 0; // unique per instrument change (project-wide), so the engine knows to rebuild it
 };
 
 struct ClipData {
@@ -73,6 +73,9 @@ public:
     static constexpr int BeatsPerBar = 4;
 
     explicit ProjectModel(QObject* parent = nullptr);
+
+    // Replaces the whole project (new or opened file): every view rebuilds on projectReset()
+    void resetProject(const QVector<TrackData>& tracks, double tempo);
 
     // Tempo
     double tempo() const { return m_tempo; }
@@ -117,6 +120,7 @@ public:
     double length() const { return m_length; }
 
 signals:
+    void projectReset();
     void tempoChanged(double bpm);
     void trackAdded(int index);
     void trackChanged(int index);
@@ -131,6 +135,7 @@ private:
     QVector<TrackData> m_tracks;
     QMap<int, ClipData> m_clips;
     int m_nextClipId = 1;
+    int m_nextRevision = 1;
     double m_tempo = 120.0;
     double m_length = 0.0;
 };

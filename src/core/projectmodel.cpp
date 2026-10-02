@@ -8,6 +8,23 @@ ProjectModel::ProjectModel(QObject* parent)
 }
 
 // ---------------------------------------------------------------------------
+// Whole project
+
+void ProjectModel::resetProject(const QVector<TrackData>& tracks, double tempo)
+{
+    m_clips.clear();
+    m_tracks = tracks;
+    for (TrackData& t : m_tracks) {
+        t.instrumentRevision = m_nextRevision++;
+    }
+    m_tempo = qBound(20.0, tempo, 400.0);
+    m_length = 0.0;
+    emit projectReset();
+    emit tempoChanged(m_tempo);
+    emit lengthChanged(m_length);
+}
+
+// ---------------------------------------------------------------------------
 // Tempo
 
 void ProjectModel::setTempo(double bpm)
@@ -35,6 +52,7 @@ int ProjectModel::addTrack(const QString& name, const QColor& color)
     TrackData track;
     track.name = name;
     track.color = color;
+    track.instrumentRevision = m_nextRevision++;
     m_tracks.append(track);
     const int index = m_tracks.size() - 1;
     emit trackAdded(index);
@@ -112,7 +130,7 @@ void ProjectModel::setTrackInstrument(int index, const InstrumentSettings& instr
         return;
     }
     m_tracks[index].instrument = instrument;
-    ++m_tracks[index].instrumentRevision;
+    m_tracks[index].instrumentRevision = m_nextRevision++;
     emit trackChanged(index);
 }
 
